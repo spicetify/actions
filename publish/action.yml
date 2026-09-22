@@ -113,9 +113,15 @@ runs:
             set -euo pipefail
             export WORK
             WORK=$(mktemp -d)
-            gh repo fork "$REGISTRY" --clone=false --remote=false || true
+            # recent gh rejects --remote alongside a repository argument.
+            gh repo fork "$REGISTRY" --clone=false
             FORK="$(gh api user --jq .login)/$(basename "$REGISTRY")"
-            git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${FORK}.git" "$WORK"
+            # a fresh fork is created asynchronously, so wait until it can be cloned.
+            for attempt in 1 2 3 4 5 6; do
+               git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${FORK}.git" "$WORK" && break
+               [ "$attempt" -eq 6 ] && exit 1
+               sleep 10
+            done
 
             mkdir -p "$WORK/vault"
             # A submission touches exactly one file: its own module's entry,
