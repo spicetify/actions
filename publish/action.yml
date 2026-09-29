@@ -81,14 +81,31 @@ runs:
             node -e '
                const { readFileSync } = require("node:fs");
                const meta = JSON.parse(readFileSync(process.env.DIST + "/metadata.json", "utf8"));
-               const pick = (k) => (typeof meta[k] === "string" && meta[k] ? { [k]: meta[k] } : {});
-               const authors = (meta.authors ?? []).map((a) => (typeof a === "string" ? { name: a } : a));
+               // Mirrors metadataSubset in spicetify/modules
+               // (packages/kit/src/vault-metadata.ts), which the registry
+               // validator compares this entry against field by field.
+               const KINDS = ["extension", "theme", "snippet", "app", "lib"];
+               const tags = Array.isArray(meta.tags) ? meta.tags : [];
+               const kind = KINDS.includes(meta.kind) ? meta.kind : KINDS.find((k) => tags.includes(k));
+               const url = (k, pattern) => (typeof meta[k] === "string" && pattern.test(meta[k]) ? { [k]: meta[k] } : {});
+               const str = (k) => (typeof meta[k] === "string" ? { [k]: meta[k] } : {});
+               const authors = Array.isArray(meta.authors)
+                  ? meta.authors.flatMap((a) =>
+                       typeof a === "string"
+                          ? [{ name: a }]
+                          : a && typeof a === "object" && typeof a.name === "string"
+                            ? [{ name: a.name, ...(typeof a.github === "string" ? { github: a.github } : {}) }]
+                            : [],
+                    )
+                  : undefined;
+               const license = typeof meta.license === "string" ? meta.license.trim() : "";
                const entry = {
                   metadata: {
-                     ...pick("name"), ...pick("description"),
-                     ...(authors.length ? { authors } : {}),
-                     ...(Array.isArray(meta.tags) ? { tags: meta.tags } : {}),
-                     ...pick("preview"), ...pick("repository"), ...pick("readme"), ...pick("license"),
+                     ...str("name"), ...str("description"),
+                     ...(authors ? { authors } : {}),
+                     ...(kind ? { kind } : {}),
+                     ...url("preview", /^https?:\/\//), ...url("repository", /^https:\/\//), ...url("readme", /^https:\/\//),
+                     ...(license ? { license } : {}),
                   },
                   v: {
                      [process.env.VERSION]: {
