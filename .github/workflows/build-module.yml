@@ -1,0 +1,213 @@
+name: Build module
+
+# A reusable workflow, not an action: the attestation it produces names
+# this file as its signer, so the registry can prove the zip came out of
+# these steps run against one commit of the calling repository, rather
+# than out of whatever the caller's own workflow chose to do.
+#
+# Building and signing are separate jobs. The build job touches the caller's
+# files with a read-only token and no id-token permission, so nothing in the
+# project can mint a token for this workflow's identity; the attest job signs
+# the build's output without ever checking the project out.
+on:
+   workflow_call:
+      inputs:
+         module:
+            description: >
+               Project directory holding package.json, its lockfile and
+               metadata.json, relative to the repository root.
+            type: string
+            default: "."
+         release-tag:
+            description: >
+               Upload the packed zip to this existing release of the calling
+               repository.
+            type: string
+            default: ""
+      outputs:
+         zip:
+            description: >
+               File name of the packed module, also the name of the workflow
+               artifact that carries it.
+            value: ${{ jobs.build.outputs.zip }}
+         checksum:
+            description: The sha256 of the packed module.
+            value: ${{ jobs.build.outputs.checksum }}
+         artifact:
+            description: The release download URL, when release-tag was given.
+            value: ${{ jobs.attest.outputs.artifact }}
+
+jobs:
+   build:
+      name: Build and pack
+      runs-on: ubuntu-latest
+      permissions:
+         contents: read
+      outputs:
+         zip: ${{ steps.pack.outputs.zip }}
+         checksum: ${{ steps.pack.outputs.checksum }}
+      steps:
+         -  name: Check out the calling commit
+            uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+            with:
+               persist-credentials: false
+
+         -  name: Set up Node
+            uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+            with:
+               node-version: "24"
+
+         -  name: Find the lockfile
+            id: project
+            env:
+               MODULE: ${{ inputs.module }}
+            run: |
+               set -euo pipefail
+               fail() { echo "::error::$1" >&2; exit 1; }
+               dir=$(realpath -e "$GITHUB_WORKSPACE/$MODULE")
+               case "$dir/" in
+                  "$GITHUB_WORKSPACE/"*) ;;
+                  *) fail "module must be inside the repository" ;;
+               esac
+               for file in package.json metadata.json; do
+                  [ -f "$dir/$file" ] || fail "$MODULE has no $file"
+               done
+               if [ -f "$dir/bun.lock" ] || [ -f "$dir/bun.lockb" ]; then
+                  pm=bun
+               elif [ -f "$dir/pnpm-lock.yaml" ]; then
+                  pm=pnpm
+               elif [ -f "$dir/package-lock.json" ]; then
+                  pm=npm
+               else
+                  fail "$MODULE has no lockfile; commit one so the build is reproducible from the commit"
+               fi
+               {
+                  echo "dir=$dir"
+                  echo "pm=$pm"
+               } >> "$GITHUB_OUTPUT"
+
+         -  name: Set up Bun
+            if: steps.project.outputs.pm == 'bun'
+            uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+         # Lifecycle scripts are skipped, and so are pnpm's .pnpmfile.cjs
+         # hooks, which run regardless of --ignore-scripts.
+         -  name: Install dependencies without running project code
+            working-directory: ${{ steps.project.outputs.dir }}
+            env:
+               PM: ${{ steps.project.outputs.pm }}
+            run: |
+               set -euo pipefail
+               case "$PM" in
+                  npm) npm ci --ignore-scripts ;;
+                  pnpm)
+                     corepack enable
+                     pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
+                     ;;
+                  bun) bun install --frozen-lockfile --ignore-scripts ;;
+               esac
+
+         -  name: Build with the published kit
+            id: build
+            env:
+               PROJECT: ${{ steps.project.outputs.dir }}
+            run: |
+               set -euo pipefail
+               fail() { echo "::error::$1" >&2; exit 1; }
+               manifest="$PROJECT/node_modules/@spicetify/kit/package.json"
+               [ -f "$manifest" ] || fail "@spicetify/kit is not a dependency of this project"
+               kit=$(node -p 'require(process.argv[1]).version' "$manifest")
+               printf '%s' "$kit" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' ||
+                  fail "unexpected @spicetify/kit version '$kit'"
+               out="$RUNNER_TEMP/dist"
+               # From an empty directory with the public registry named, so no
+               # .npmrc in the project can substitute a different kit or a
+               # script-shell for npm exec.
+               work=$(mktemp -d)
+               (cd "$work" && npm exec --yes --registry=https://registry.npmjs.org/ \
+                  --package="@spicetify/kit@$kit" -- spicetify-kit build "$PROJECT" --out "$out")
+               shopt -s nullglob
+               built=("$out"/*/)
+               [ "${#built[@]}" -eq 1 ] || fail "expected one built module in $out"
+               {
+                  echo "dist=${built[0]%/}"
+                  echo "kit=$kit"
+               } >> "$GITHUB_OUTPUT"
+
+         -  name: Pack
+            id: pack
+            env:
+               DIST: ${{ steps.build.outputs.dist }}
+               KIT: ${{ steps.build.outputs.kit }}
+            run: |
+               set -euo pipefail
+               meta="$DIST/metadata.json"
+               id=$(node -p 'require(process.argv[1]).name' "$meta")
+               version=$(node -p 'require(process.argv[1]).version' "$meta")
+               zip="${id}@${version}.zip"
+               mkdir -p "$RUNNER_TEMP/packed"
+               (cd "$DIST" && zip -qrX "$RUNNER_TEMP/packed/$zip" .)
+               checksum="sha256:$(sha256sum "$RUNNER_TEMP/packed/$zip" | cut -d' ' -f1)"
+               {
+                  echo "zip=$zip"
+                  echo "path=$RUNNER_TEMP/packed/$zip"
+                  echo "checksum=$checksum"
+               } >> "$GITHUB_OUTPUT"
+               echo "packed $zip ($checksum) with @spicetify/kit@$KIT"
+
+         -  name: Hand the zip to the attest job
+            uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+            with:
+               name: ${{ steps.pack.outputs.zip }}
+               path: ${{ steps.pack.outputs.path }}
+               if-no-files-found: error
+
+   attest:
+      name: Attest and release
+      needs: build
+      runs-on: ubuntu-latest
+      permissions:
+         contents: write
+         id-token: write
+         attestations: write
+      outputs:
+         artifact: ${{ steps.release.outputs.artifact }}
+      steps:
+         -  name: Download the built zip
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+            with:
+               name: ${{ needs.build.outputs.zip }}
+               path: ${{ runner.temp }}/packed
+
+         -  name: Check it is the zip the build reported
+            env:
+               ZIP: ${{ runner.temp }}/packed/${{ needs.build.outputs.zip }}
+               CHECKSUM: ${{ needs.build.outputs.checksum }}
+            run: |
+               set -euo pipefail
+               actual="sha256:$(sha256sum "$ZIP" | cut -d' ' -f1)"
+               if [ "$actual" != "$CHECKSUM" ]; then
+                  echo "::error::downloaded $actual, built $CHECKSUM" >&2
+                  exit 1
+               fi
+
+         -  name: Attest build provenance
+            uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+            with:
+               subject-path: ${{ runner.temp }}/packed/${{ needs.build.outputs.zip }}
+
+         # No --clobber: a published zip is what a vault checksum describes,
+         # so replacing it in place would break every entry that points at it.
+         -  name: Upload to the release
+            id: release
+            if: inputs.release-tag != ''
+            env:
+               GH_TOKEN: ${{ github.token }}
+               TAG: ${{ inputs.release-tag }}
+               ZIP: ${{ runner.temp }}/packed/${{ needs.build.outputs.zip }}
+               NAME: ${{ needs.build.outputs.zip }}
+            run: |
+               set -euo pipefail
+               gh release upload "$TAG" "$ZIP" --repo "$GITHUB_REPOSITORY"
+               base="https://github.com/${GITHUB_REPOSITORY}/releases/download"
+               echo "artifact=$base/${TAG}/${NAME}" >> "$GITHUB_OUTPUT"
