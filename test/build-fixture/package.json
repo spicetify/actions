@@ -1,0 +1,14 @@
+{
+	"name": "build-fixture",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "spicetify-kit build .",
+		"dev": "spicetify-kit dev .",
+		"remove": "spicetify-kit remove .",
+		"check": "spicetify-kit check ."
+	},
+	"devDependencies": {
+		"@spicetify/kit": "^0.4.4"
+	}
+}

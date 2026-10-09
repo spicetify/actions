@@ -1,0 +1,70 @@
+name: Test build-module
+
+# Runs the reusable workflow the way an author would, on the fixture module
+# under test/, then verifies the attestation exactly as the registry's
+# validator does. Fork pull requests get no id-token, so they skip it.
+on:
+   pull_request:
+      paths:
+         - ".github/workflows/build-module.yml"
+         - ".github/workflows/test-build-module.yml"
+         - "test/build-fixture/**"
+   push:
+      branches: [main]
+
+permissions: {}
+
+jobs:
+   build:
+      if: >
+         github.event_name == 'push' ||
+         github.event.pull_request.head.repo.full_name == github.repository
+      uses: ./.github/workflows/build-module.yml
+      permissions:
+         contents: write
+         id-token: write
+         attestations: write
+      with:
+         module: test/build-fixture
+
+   verify:
+      name: Verify the attestation
+      needs: build
+      runs-on: ubuntu-latest
+      permissions:
+         contents: read
+         attestations: read
+      steps:
+         -  name: Download the attested zip
+            uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+            with:
+               name: ${{ needs.build.outputs.zip }}
+
+         -  name: Verify it was signed by build-module on a hosted runner
+            env:
+               GH_TOKEN: ${{ github.token }}
+               ZIP: ${{ needs.build.outputs.zip }}
+               CHECKSUM: ${{ needs.build.outputs.checksum }}
+               SIGNER: spicetify/actions/.github/workflows/build-module.yml
+            run: |
+               set -euo pipefail
+               fail() { echo "::error::$1" >&2; exit 1; }
+               gh attestation verify "$ZIP" --repo "$GITHUB_REPOSITORY" \
+                  --signer-workflow "$SIGNER" --deny-self-hosted-runners \
+                  --format json > verification.json
+               result='.[0].verificationResult'
+               digest=$(jq -r "$result.statement.subject[0].digest.sha256" \
+                  verification.json)
+               commit=$(jq -r "$result.signature.certificate.sourceRepositoryDigest" \
+                  verification.json)
+               [ "sha256:$digest" = "$CHECKSUM" ] ||
+                  fail "subject $digest is not $CHECKSUM"
+               [ "$commit" = "$GITHUB_SHA" ] ||
+                  fail "source commit $commit is not $GITHUB_SHA"
+               echo "verified $ZIP from $GITHUB_REPOSITORY@$commit"
+
+         -  name: Keep the verification for the registry validator's fixtures
+            uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+            with:
+               name: verification
+               path: verification.json
