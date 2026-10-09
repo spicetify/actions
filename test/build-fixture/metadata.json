@@ -1,0 +1,14 @@
+{
+	"name": "build-fixture",
+	"kind": "theme",
+	"version": "0.1.0",
+	"authors": [
+		"spicetify"
+	],
+	"description": "Fixture built by the build-module workflow's own tests",
+	"entries": {
+		"css": "index.css"
+	},
+	"hasMixins": false,
+	"dependencies": {}
+}

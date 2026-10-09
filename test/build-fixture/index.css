@@ -1,0 +1,15 @@
+/*
+ * build-fixture — a spicetify theme.
+ *
+ * color.ini defines the palette; the loader exposes each key as a --spice-*
+ * CSS variable and applies your chosen [Section] as the active scheme. Add
+ * rules here that consume those variables to restyle the client.
+ */
+
+.main-view-container__scroll-node {
+	background-color: var(--spice-main);
+}
+
+.main-nowPlayingBar-nowPlayingBar {
+	background-color: var(--spice-player);
+}
