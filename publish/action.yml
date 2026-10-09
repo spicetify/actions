@@ -9,8 +9,16 @@ description: >
 # submit by hand, so no one has to hold a credential to publish.
 inputs:
    dist:
-      description: The built module directory (contains metadata.json).
-      required: true
+      description: >
+         The built module directory (contains metadata.json). Required unless
+         zip is given.
+      required: false
+   zip:
+      description: >
+         An already packed module, such as the attested zip the build-module
+         workflow produces. Submitted byte for byte instead of packing dist,
+         so the checksum is the one its attestation covers.
+      required: false
    artifact:
       description: >
          Public https URL the packed zip will be served from. Upload the zip
@@ -49,15 +57,30 @@ runs:
          shell: bash
          env:
             DIST: ${{ inputs.dist }}
+            PACKED: ${{ inputs.zip }}
             ARTIFACT: ${{ inputs.artifact }}
             RELEASE_TAG: ${{ inputs.release-tag }}
             GH_TOKEN: ${{ github.token }}
          run: |
             set -euo pipefail
-            ID=$(node -p "require('./' + process.env.DIST + '/metadata.json').name")
-            VERSION=$(node -p "require('./' + process.env.DIST + '/metadata.json').version")
+            if [ -n "$PACKED" ]; then
+               DIST=$(mktemp -d)
+               unzip -q "$PACKED" metadata.json -d "$DIST"
+            elif [ -z "$DIST" ]; then
+               echo "::error::pass either dist or zip" >&2
+               exit 1
+            fi
+            export DIST
+            META="$(realpath "$DIST")/metadata.json"
+            ID=$(node -p 'require(process.argv[1]).name' "$META")
+            VERSION=$(node -p 'require(process.argv[1]).version' "$META")
             ZIP="${ID}@${VERSION}.zip"
-            (cd "$DIST" && zip -qr "${GITHUB_WORKSPACE}/${ZIP}" .)
+            if [ -n "$PACKED" ]; then
+               target="${GITHUB_WORKSPACE}/${ZIP}"
+               [ "$PACKED" -ef "$target" ] || cp "$PACKED" "$target"
+            else
+               (cd "$DIST" && zip -qr "${GITHUB_WORKSPACE}/${ZIP}" .)
+            fi
 
             if [ -n "$RELEASE_TAG" ]; then
                gh release upload "$RELEASE_TAG" "$ZIP" --clobber
